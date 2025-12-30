@@ -8,10 +8,12 @@ def get_config():
     parser = argparse.ArgumentParser()
     
     # 数据相关
-    parser.add_argument('--dataset', type=str, default='rcs_jtf', help='数据集名称')
-    parser.add_argument('--data_path', type=str, default='./dataset/', help='数据路径')
+    parser.add_argument('--dataset', type=str, default='rcs_tf', help='数据集名称')
+    parser.add_argument('--train_data_dir', type=str, default='./train_data/', help='训练数据路径')
+    parser.add_argument('--test_data_dir', type=str, default='./test_data/', help='测试数据路径')
+    parser.add_argument('--noise_level', type=int, default=0, help='噪声级别(dB), 如0, 5, 10等')
     parser.add_argument('--rcs_dim', type=int, default=256, help='RCS序列长度')
-    parser.add_argument('--jtf_size', type=int, default=256, help='JTF图像大小')
+    parser.add_argument('--tf_size', type=int, default=256, help='TF图像大小')
     parser.add_argument('--num_classes', type=int, default=10, help='分类类别数')
     
     # 模型相关
@@ -33,6 +35,7 @@ def get_config():
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='权重衰减')
     parser.add_argument('--warmup_steps', type=int, default=100, help='预热步数')
     parser.add_argument('--grad_clip', type=float, default=1.0, help='梯度裁剪')
+    parser.add_argument('--test_interval', type=int, default=10, help='测试间隔(每N轮测试一次)')
     
     # 设备相关
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')

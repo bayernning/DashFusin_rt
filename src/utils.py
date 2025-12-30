@@ -142,41 +142,58 @@ def visualize_training_history(history_path, save_path=None):
         
         history = np.load(history_path, allow_pickle=True).item()
         
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
         # 损失曲线
-        axes[0].plot(history['train_losses'], label='Train Loss')
-        axes[0].plot(history['val_losses'], label='Val Loss')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].set_title('Training and Validation Loss')
-        axes[0].legend()
-        axes[0].grid(True)
+        epochs = range(1, len(history['train_losses']) + 1)
+        axes[0].plot(epochs, history['train_losses'], 'b-', label='Train Loss', linewidth=2)
+        
+        # 测试损失（在特定epoch）
+        if 'test_epochs' in history and len(history['test_epochs']) > 0:
+            axes[0].plot(history['test_epochs'], history['test_losses'], 
+                        'r-o', label='Test Loss', linewidth=2, markersize=6)
+        
+        axes[0].set_xlabel('Epoch', fontsize=12)
+        axes[0].set_ylabel('Loss', fontsize=12)
+        axes[0].set_title('Training and Test Loss', fontsize=14, fontweight='bold')
+        axes[0].legend(fontsize=10)
+        axes[0].grid(True, alpha=0.3)
         
         # 准确率曲线
-        axes[1].plot(history['val_accs'], label='Val Accuracy')
-        axes[1].axhline(y=history['best_val_acc'], color='r', linestyle='--', 
-                       label=f"Best: {history['best_val_acc']:.2f}%")
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy (%)')
-        axes[1].set_title('Validation Accuracy')
-        axes[1].legend()
-        axes[1].grid(True)
+        axes[1].plot(epochs, history['train_accs'], 'b-', label='Train Acc', linewidth=2)
+        
+        # 测试准确率（在特定epoch）
+        if 'test_epochs' in history and len(history['test_epochs']) > 0:
+            axes[1].plot(history['test_epochs'], history['test_accs'], 
+                        'r-o', label='Test Acc', linewidth=2, markersize=6)
+            # 标记最佳点
+            best_idx = np.argmax(history['test_accs'])
+            best_epoch = history['test_epochs'][best_idx]
+            best_acc = history['test_accs'][best_idx]
+            axes[1].axhline(y=best_acc, color='g', linestyle='--', 
+                          label=f'Best: {best_acc:.2f}% @Epoch{best_epoch}', linewidth=1.5)
+            axes[1].plot(best_epoch, best_acc, 'g*', markersize=15)
+        
+        axes[1].set_xlabel('Epoch', fontsize=12)
+        axes[1].set_ylabel('Accuracy (%)', fontsize=12)
+        axes[1].set_title('Training and Test Accuracy', fontsize=14, fontweight='bold')
+        axes[1].legend(fontsize=10)
+        axes[1].grid(True, alpha=0.3)
         
         plt.tight_layout()
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Training history plot saved to {save_path}")
+            print(f"训练历史图已保存到: {save_path}")
         else:
             plt.show()
         
         plt.close()
         
     except ImportError:
-        print("matplotlib not installed, skipping visualization")
+        print("matplotlib未安装，跳过可视化")
     except Exception as e:
-        print(f"Error visualizing training history: {e}")
+        print(f"可视化训练历史时出错: {e}")
 
 
 if __name__ == '__main__':

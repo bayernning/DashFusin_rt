@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model.encoders import RCSEncoder, JTFEncoder
+from model.encoders import RCSEncoder, TFEncoder
 from model.layers import CrossModalAttention, HierarchicalBottleneckFusion
 from model.MLP import DualProjector, MultimodalClassifier
 
@@ -14,51 +14,51 @@ class DualStreamAlignment(nn.Module):
     def __init__(self, hidden_dim, num_heads, dropout=0.1):
         super().__init__()
         # 时间对齐: 跨模态注意力
-        self.jtf_to_rcs = CrossModalAttention(hidden_dim, num_heads, dropout)
+        self.tf_to_rcs = CrossModalAttention(hidden_dim, num_heads, dropout)
         
         # 语义对齐: 使用MLP中的投影头
         from model.MLP import Projector
         self.rcs_projector = Projector(hidden_dim, output_dim=128, dropout=dropout)
-        self.jtf_projector = Projector(hidden_dim, output_dim=128, dropout=dropout)
+        self.tf_projector = Projector(hidden_dim, output_dim=128, dropout=dropout)
         
         self.norm = nn.LayerNorm(hidden_dim)
         
-    def temporal_alignment(self, rcs_feat, jtf_feat):
+    def temporal_alignment(self, rcs_feat, tf_feat):
         """
-        时间对齐: 以RCS为锚点，将JTF对齐到RCS
+        时间对齐: 以RCS为锚点，将TF对齐到RCS
         rcs_feat: [batch, seq_len_rcs, hidden_dim]
-        jtf_feat: [batch, seq_len_jtf, hidden_dim]
+        tf_feat: [batch, seq_len_tf, hidden_dim]
         """
-        # JTF -> RCS
-        jtf_to_rcs = self.jtf_to_rcs(rcs_feat, jtf_feat, jtf_feat)
+        # TF -> RCS
+        tf_to_rcs = self.tf_to_rcs(rcs_feat, tf_feat, tf_feat)
         
-        # 融合: RCS + aligned_JTF
-        aligned_feat = self.norm(rcs_feat + jtf_to_rcs)
+        # 融合: RCS + aligned_TF
+        aligned_feat = self.norm(rcs_feat + tf_to_rcs)
         
         return aligned_feat
     
-    def semantic_alignment(self, rcs_feat, jtf_feat):
+    def semantic_alignment(self, rcs_feat, tf_feat):
         """
         语义对齐: 获取全局特征并投影到对比学习空间
         """
         # 全局平均池化
         rcs_global = rcs_feat.mean(dim=1)  # [batch, hidden_dim]
-        jtf_global = jtf_feat.mean(dim=1)  # [batch, hidden_dim]
+        tf_global = tf_feat.mean(dim=1)  # [batch, hidden_dim]
         
         # 投影
         rcs_proj = self.rcs_projector(rcs_global)
-        jtf_proj = self.jtf_projector(jtf_global)
+        tf_proj = self.tf_projector(tf_global)
         
-        return rcs_proj, jtf_proj
+        return rcs_proj, tf_proj
     
-    def forward(self, rcs_feat, jtf_feat):
+    def forward(self, rcs_feat, tf_feat):
         # 时间对齐
-        aligned_feat = self.temporal_alignment(rcs_feat, jtf_feat)
+        aligned_feat = self.temporal_alignment(rcs_feat, tf_feat)
         
         # 语义对齐
-        rcs_proj, jtf_proj = self.semantic_alignment(rcs_feat, jtf_feat)
+        rcs_proj, tf_proj = self.semantic_alignment(rcs_feat, tf_feat)
         
-        return aligned_feat, rcs_proj, jtf_proj
+        return aligned_feat, rcs_proj, tf_proj
 
 
 class SupervisedContrastiveLoss(nn.Module):
@@ -120,8 +120,7 @@ class DashFusion(nn.Module):
             dropout=config.dropout
         )
         
-        self.jtf_encoder = JTFEncoder(
-            jtf_size=config.jtf_size,
+        self.tf_encoder = TFEncoder(
             hidden_dim=config.hidden_dim,
             num_layers=config.num_encoder_layers,
             num_heads=config.num_heads,
@@ -152,38 +151,38 @@ class DashFusion(nn.Module):
         # 5. 分类器 - 使用MultimodalClassifier
         self.classifier = MultimodalClassifier(
             rcs_dim=config.hidden_dim,
-            jtf_dim=config.hidden_dim,
+            jtf_dim=config.hidden_dim,  # TF特征维度
             bottleneck_dim=config.hidden_dim,
             hidden_dims=[config.hidden_dim * 2, config.hidden_dim],
             num_classes=config.num_classes,
             dropout=config.dropout
         )
         
-    def forward(self, rcs, jtf, labels=None):
+    def forward(self, rcs, tf, labels=None):
         """
         rcs: [batch, 1, 256]
-        jtf: [batch, 1, 256, 256]
+        tf: [batch, 1, H, W]
         labels: [batch] (optional)
         """
         # 1. 模态编码
         rcs_feat = self.rcs_encoder(rcs)      # [batch, 256, hidden_dim]
-        jtf_feat = self.jtf_encoder(jtf)      # [batch, 256, hidden_dim]
+        tf_feat = self.tf_encoder(tf)         # [batch, seq_len, hidden_dim]
         
         # 2. 双流对齐
-        aligned_feat, rcs_proj, jtf_proj = self.dual_alignment(rcs_feat, jtf_feat)
+        aligned_feat, rcs_proj, tf_proj = self.dual_alignment(rcs_feat, tf_feat)
         
         # 3. 层次瓶颈融合
-        bottleneck, rcs_fused, jtf_fused = self.hierarchical_fusion(
-            rcs_feat, jtf_feat, aligned_feat
+        bottleneck, rcs_fused, tf_fused = self.hierarchical_fusion(
+            rcs_feat, tf_feat, aligned_feat
         )
         
         # 4. 全局特征提取
         rcs_global = rcs_fused.mean(dim=1)      # [batch, hidden_dim]
-        jtf_global = jtf_fused.mean(dim=1)      # [batch, hidden_dim]
+        tf_global = tf_fused.mean(dim=1)        # [batch, hidden_dim]
         bottleneck_global = bottleneck.mean(dim=1)  # [batch, hidden_dim]
         
         # 5. 分类 - 使用MultimodalClassifier
-        logits = self.classifier(rcs_global, jtf_global, bottleneck_global)
+        logits = self.classifier(rcs_global, tf_global, bottleneck_global)
         
         # 计算损失
         if labels is not None:
@@ -191,7 +190,7 @@ class DashFusion(nn.Module):
             cls_loss = F.cross_entropy(logits, labels)
             
             # 对比学习损失
-            contrast_loss = self.contrast_loss(rcs_proj, jtf_proj, labels)
+            contrast_loss = self.contrast_loss(rcs_proj, tf_proj, labels)
             
             # 总损失
             total_loss = cls_loss + self.config.contrast_loss_weight * contrast_loss
@@ -202,7 +201,7 @@ class DashFusion(nn.Module):
                 'cls_loss': cls_loss,
                 'contrast_loss': contrast_loss,
                 'rcs_feat': rcs_global,
-                'jtf_feat': jtf_global,
+                'tf_feat': tf_global,
                 'bottleneck_feat': bottleneck_global
             }
         

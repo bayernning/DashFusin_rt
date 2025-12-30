@@ -69,17 +69,17 @@ class MultiCrossAttention(nn.Module):
     def __init__(self, hidden_dim, num_heads, dropout=0.1):
         super().__init__()
         self.rcs_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
-        self.jtf_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
+        self.tf_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
         
-    def forward(self, query, rcs_feat, jtf_feat):
+    def forward(self, query, rcs_feat, tf_feat):
         """
-        从RCS和JTF特征收集信息到query
+        从RCS和TF特征收集信息到query
         """
         attn_from_rcs = self.rcs_cross_attn(query, rcs_feat, rcs_feat)
-        attn_from_jtf = self.jtf_cross_attn(query, jtf_feat, jtf_feat)
+        attn_from_tf = self.tf_cross_attn(query, tf_feat, tf_feat)
         
         # 残差连接
-        output = query + attn_from_rcs + attn_from_jtf
+        output = query + attn_from_rcs + attn_from_tf
         return output
 
 
@@ -137,33 +137,33 @@ class HierarchicalBottleneckFusionLayer(nn.Module):
         
         # 阶段2: 用瓶颈更新各模态特征
         self.rcs_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
-        self.jtf_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
+        self.tf_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
         
         # Feed-forward和LayerNorm
         self.ffn_bottleneck = FeedForward(hidden_dim, dropout=dropout)
         self.ffn_rcs = FeedForward(hidden_dim, dropout=dropout)
-        self.ffn_jtf = FeedForward(hidden_dim, dropout=dropout)
+        self.ffn_tf = FeedForward(hidden_dim, dropout=dropout)
         
         self.norm_bottleneck1 = nn.LayerNorm(hidden_dim)
         self.norm_bottleneck2 = nn.LayerNorm(hidden_dim)
         self.norm_rcs1 = nn.LayerNorm(hidden_dim)
         self.norm_rcs2 = nn.LayerNorm(hidden_dim)
-        self.norm_jtf1 = nn.LayerNorm(hidden_dim)
-        self.norm_jtf2 = nn.LayerNorm(hidden_dim)
+        self.norm_tf1 = nn.LayerNorm(hidden_dim)
+        self.norm_tf2 = nn.LayerNorm(hidden_dim)
         
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, bottleneck, rcs_feat, jtf_feat):
+    def forward(self, bottleneck, rcs_feat, tf_feat):
         """
         bottleneck: [batch, num_bottleneck, hidden_dim]
         rcs_feat: [batch, seq_len_rcs, hidden_dim]
-        jtf_feat: [batch, seq_len_jtf, hidden_dim]
+        tf_feat: [batch, seq_len_tf, hidden_dim]
         """
         # 取前num_bottleneck个token
         bottleneck = bottleneck[:, :self.num_bottleneck, :]
         
         # 阶段1: 从各模态收集信息到瓶颈
-        attn_output = self.multi_cross_attn(bottleneck, rcs_feat, jtf_feat)
+        attn_output = self.multi_cross_attn(bottleneck, rcs_feat, tf_feat)
         bottleneck = self.norm_bottleneck1(bottleneck + self.dropout(attn_output))
         
         # Feed-forward
@@ -176,12 +176,12 @@ class HierarchicalBottleneckFusionLayer(nn.Module):
         rcs_feat = self.norm_rcs1(rcs_feat + self.dropout(rcs_update))
         rcs_feat = self.norm_rcs2(rcs_feat + self.dropout(self.ffn_rcs(rcs_feat)))
         
-        # 更新JTF特征
-        jtf_update = self.jtf_cross_attn(jtf_feat, bottleneck, bottleneck)
-        jtf_feat = self.norm_jtf1(jtf_feat + self.dropout(jtf_update))
-        jtf_feat = self.norm_jtf2(jtf_feat + self.dropout(self.ffn_jtf(jtf_feat)))
+        # 更新TF特征
+        tf_update = self.tf_cross_attn(tf_feat, bottleneck, bottleneck)
+        tf_feat = self.norm_tf1(tf_feat + self.dropout(tf_update))
+        tf_feat = self.norm_tf2(tf_feat + self.dropout(self.ffn_tf(tf_feat)))
         
-        return bottleneck, rcs_feat, jtf_feat
+        return bottleneck, rcs_feat, tf_feat
 
 
 class HierarchicalBottleneckFusion(nn.Module):
@@ -210,10 +210,10 @@ class HierarchicalBottleneckFusion(nn.Module):
             for i in range(num_layers)
         ])
         
-    def forward(self, rcs_feat, jtf_feat, aligned_feat):
+    def forward(self, rcs_feat, tf_feat, aligned_feat):
         """
         rcs_feat: [batch, seq_len_rcs, hidden_dim]
-        jtf_feat: [batch, seq_len_jtf, hidden_dim]
+        tf_feat: [batch, seq_len_tf, hidden_dim]
         aligned_feat: [batch, seq_len, hidden_dim] - 时间对齐后的多模态特征
         """
         batch_size = rcs_feat.size(0)
@@ -224,6 +224,6 @@ class HierarchicalBottleneckFusion(nn.Module):
         
         # 逐层融合
         for layer in self.fusion_layers:
-            bottleneck, rcs_feat, jtf_feat = layer(bottleneck, rcs_feat, jtf_feat)
+            bottleneck, rcs_feat, tf_feat = layer(bottleneck, rcs_feat, tf_feat)
         
-        return bottleneck, rcs_feat, jtf_feat
+        return bottleneck, rcs_feat, tf_feat

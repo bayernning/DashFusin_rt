@@ -63,15 +63,14 @@ class RCSEncoder(nn.Module):
         return x  # [batch, 256, hidden_dim]
 
 
-class JTFEncoder(nn.Module):
+class TFEncoder(nn.Module):
     """
-    JTF时频图编码器
-    输入: [batch, 1, 256, 256] - JTF时频图
+    TF时频图编码器
+    输入: [batch, 1, H, W] - TF时频图 (H和W可以不固定)
     输出: [batch, seq_len, hidden_dim] - 编码后的序列特征
     """
-    def __init__(self, jtf_size=256, hidden_dim=128, num_layers=2, num_heads=4, dropout=0.1):
+    def __init__(self, hidden_dim=128, num_layers=2, num_heads=4, dropout=0.1):
         super().__init__()
-        self.jtf_size = jtf_size
         self.hidden_dim = hidden_dim
         
         # 2D卷积用于图像特征提取
