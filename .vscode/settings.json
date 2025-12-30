@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./src/rcs_dashfusion_",
+        "./src/model"
+    ]
+}
