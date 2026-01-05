@@ -1,5 +1,5 @@
 """
-训练脚本 - 每10轮测试一次
+训练脚本 - 包含完整的 Hard Negative Mining (难样本挖掘) 逻辑
 """
 import torch
 import torch.nn as nn
@@ -19,9 +19,9 @@ class Trainer:
         self.config = config
         self.device = config.device
 
-        # ================= 改动开始 =================
-        # 1. 优化器参数分组 (模仿参考代码的最佳实践)
-        # 目的：不对 Bias 和 LayerNorm/BatchNorm 进行权重衰减，提升模型稳定性
+        # ============================================================
+        # 1. 优化器配置 (不衰减 Bias 和 Norm 层，提升稳定性)
+        # ============================================================
         no_decay = ['bias', 'LayerNorm.weight', 'norm.weight', 'norm1.weight', 'norm2.weight']
         
         optimizer_grouped_parameters = [
@@ -31,31 +31,30 @@ class Trainer:
             },
             {
                 'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
-                'weight_decay': 0.0  # 这些参数不进行衰减
+                'weight_decay': 0.0
             }
         ]
         
         self.optimizer = optim.AdamW(
-            optimizer_grouped_parameters, # 使用分组后的参数
+            optimizer_grouped_parameters,
             lr=config.learning_rate
-            # weight_decay 在上面组里定义了，这里不需要了
         )
         
-        
-        # 学习率调度器: warmup + cosine annealing
+        # ============================================================
+        # 2. 学习率调度器 (Warmup + Cosine)
+        # ============================================================
         warmup_scheduler = LinearLR(
             self.optimizer,
             start_factor=0.01,
             total_iters=config.warmup_steps
         )
         
-        # 计算总步数
         total_steps = config.epochs * len(train_loader)
         
         cosine_scheduler = CosineAnnealingLR(
             self.optimizer,
             T_max=total_steps - config.warmup_steps,
-            eta_min=config.learning_rate * 0.01 # 结束时不降到0，保留一点点
+            eta_min=config.learning_rate * 0.01
         )
         
         self.scheduler = SequentialLR(
@@ -64,24 +63,76 @@ class Trainer:
             milestones=[config.warmup_steps]
         )
         
-        # 创建保存目录
+        # ============================================================
+        # 3. 目录与状态初始化
+        # ============================================================
         os.makedirs(config.log_dir, exist_ok=True)
         os.makedirs(config.ckpt_dir, exist_ok=True)
         os.makedirs(config.result_dir, exist_ok=True)
         
-        # 最佳测试准确率
         self.best_test_acc = 0.0
         self.best_epoch = 0
         
-        # 日志
+        # 记录训练曲线
         self.train_losses = []
         self.train_accs = []
         self.test_losses = []
         self.test_accs = []
-        self.test_epochs = []  # 记录测试的epoch
+        self.test_epochs = []
+
+    def update_similarity_matrix(self):
+        """
+        [核心逻辑] 更新全局相似度矩阵
+        遍历整个训练集，提取特征，让 Dataset 重新计算难负样本
+        """
+        print("\n[Trainer] 正在收集全量特征以更新相似度矩阵 (Hard Negative Mining)...")
+        self.model.eval()
         
+        # 准备容器: [DatasetSize, Dim]
+        # 注意：必须使用 indices 把乱序的 loader 数据填回正确的位置
+        dataset_size = len(self.train_loader.dataset)
+        hidden_dim = self.config.hidden_dim
+        
+        all_rcs = torch.zeros(dataset_size, hidden_dim).to(self.device)
+        all_tf = torch.zeros(dataset_size, hidden_dim).to(self.device)
+        filled_mask = torch.zeros(dataset_size, dtype=torch.bool).to(self.device)
+        
+        with torch.no_grad():
+            # 使用 tqdm 显示进度
+            for batch in tqdm(self.train_loader, desc="Updating Matrix"):
+                # 解包数据 (兼容 dataset 返回 3个 或 4个 值的情况)
+                if len(batch) == 4:
+                    rcs, tf, labels, indices = batch
+                else:
+                    print("错误: Dataset 必须返回 (rcs, tf, labels, indices) 才能使用 Hard Mining!")
+                    return
+
+                rcs = rcs.to(self.device)
+                tf = tf.to(self.device)
+                indices = indices.to(self.device)
+                
+                # 提取特征 (取均值作为全局表示)
+                # 假设 encoder 返回 [B, Seq, Dim]，我们需要 [B, Dim]
+                rcs_feat = self.model.rcs_encoder(rcs).mean(dim=1)
+                tf_feat = self.model.tf_encoder(tf).mean(dim=1)
+                
+                # 填入对应的位置
+                all_rcs[indices] = rcs_feat
+                all_tf[indices] = tf_feat
+                filled_mask[indices] = True
+        
+        # 检查是否所有数据都覆盖了
+        if not filled_mask.all():
+            print(f"警告: 有 {(~filled_mask).sum().item()} 个样本未被更新! 请检查 DataLoader 逻辑。")
+
+        # 调用 Dataset 的更新方法 (转回 CPU 以节省显存)
+        self.train_loader.dataset.update_matrix(all_rcs.cpu(), all_tf.cpu())
+        
+        self.model.train()
+        print("[Trainer] 相似度矩阵更新完成。\n")
+
     def train_epoch(self, epoch):
-        """训练一个epoch"""
+        """训练一个 Epoch"""
         self.model.train()
         
         total_loss = 0
@@ -92,20 +143,36 @@ class Trainer:
         
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch}/{self.config.epochs}')
         
-        for batch_idx, (rcs, tf, labels) in enumerate(pbar):
-            # 数据移到设备
+        for batch_idx, batch in enumerate(pbar):
+            # 1. 解包数据
+            # 注意：Dataset 的 __getitem__ 必须返回 index
+            if len(batch) == 4:
+                rcs, tf, labels, indices = batch
+            else:
+                # 兼容旧代码，但这样就没有 Sample2 了
+                rcs, tf, labels = batch
+                indices = None
+            
             rcs = rcs.to(self.device)
             tf = tf.to(self.device)
             labels = labels.to(self.device)
             
-            # 前向传播
-            outputs = self.model(rcs, tf, labels)
+            # 2. 获取 Sample2 (难负样本)
+            sample2 = None
+            if indices is not None:
+                # 调用 dataset.sample 获取对应的 6 个辅助样本
+                # indices 需要转为 list
+                sample2 = self.train_loader.dataset.sample(indices.tolist())
+            
+            # 3. 前向传播 (传入 sample2)
+            outputs = self.model(rcs, tf, labels, sample2=sample2)
+            
             loss = outputs['loss']
-            cls_loss = outputs['cls_loss']
-            contrast_loss = outputs['contrast_loss']
+            cls_loss = outputs.get('cls_loss', torch.tensor(0.0))
+            contrast_loss = outputs.get('contrast_loss', torch.tensor(0.0))
             logits = outputs['logits']
             
-            # 反向传播
+            # 4. 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             
@@ -115,7 +182,7 @@ class Trainer:
             self.optimizer.step()
             self.scheduler.step()
             
-            # 统计
+            # 5. 统计指标
             total_loss += loss.item()
             total_cls_loss += cls_loss.item()
             total_contrast_loss += contrast_loss.item()
@@ -133,6 +200,7 @@ class Trainer:
                 'lr': f'{self.optimizer.param_groups[0]["lr"]:.6f}'
             })
         
+        # 计算平均值
         avg_loss = total_loss / len(self.train_loader)
         avg_cls_loss = total_cls_loss / len(self.train_loader)
         avg_contrast_loss = total_contrast_loss / len(self.train_loader)
@@ -142,7 +210,7 @@ class Trainer:
     
     @torch.no_grad()
     def test(self):
-        """测试"""
+        """测试模型"""
         self.model.eval()
         
         total_loss = 0
@@ -151,11 +219,19 @@ class Trainer:
         all_preds = []
         all_labels = []
         
-        for rcs, tf, labels in tqdm(self.test_loader, desc='Testing'):
+        # 测试集不需要 indices
+        for batch in tqdm(self.test_loader, desc='Testing'):
+            # 兼容可能返回 index 的情况
+            if len(batch) == 4:
+                rcs, tf, labels, _ = batch
+            else:
+                rcs, tf, labels = batch
+                
             rcs = rcs.to(self.device)
             tf = tf.to(self.device)
             labels = labels.to(self.device)
             
+            # 测试时不需要 sample2
             outputs = self.model(rcs, tf, labels)
             loss = outputs['loss']
             logits = outputs['logits']
@@ -175,7 +251,7 @@ class Trainer:
         return avg_loss, test_acc, all_preds, all_labels
     
     def save_checkpoint(self, epoch, is_best=False):
-        """保存checkpoint"""
+        """保存 Checkpoint"""
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -185,38 +261,47 @@ class Trainer:
             'config': self.config
         }
         
-        # 保存最新checkpoint
+        # 保存 last.pth
         ckpt_path = os.path.join(self.config.ckpt_dir, 'last.pth')
         torch.save(checkpoint, ckpt_path)
         
-        # 保存最佳checkpoint
+        # 保存 best.pth
         if is_best:
             best_path = os.path.join(self.config.ckpt_dir, 'best.pth')
             torch.save(checkpoint, best_path)
             print(f'✓ 保存最佳模型，测试准确率: {self.best_test_acc:.2f}%')
     
     def train(self):
-        """完整训练流程"""
+        """主训练流程"""
         print(f"\n{'='*60}")
-        print(f"训练DashFusion on {self.device}")
-        print(f"模型参数: {self.model.get_num_params():,}")
+        print(f"训练 DashFusion on {self.device}")
+        print(f"模型参数: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
         print(f"训练样本: {len(self.train_loader.dataset)}")
-        print(f"测试样本: {len(self.test_loader.dataset)}")
-        print(f"测试间隔: 每{self.config.test_interval}轮")
+        print(f"测试间隔: 每 {self.config.test_interval} 轮")
         print(f"{'='*60}\n")
         
+        # 为了生成初始的 Sample2，建议在第1轮开始前也更新一次（可选）
+        # self.update_similarity_matrix() 
+        
         for epoch in range(1, self.config.epochs + 1):
+            
+            # ========================================================
+            # [关键逻辑] 每隔 2 轮更新一次相似度矩阵 (复刻原文)
+            # ========================================================
+            if (epoch - 1) % 2 == 0:
+                self.update_similarity_matrix()
+            
             # 训练
             train_loss, cls_loss, con_loss, train_acc = self.train_epoch(epoch)
+            
             self.train_losses.append(train_loss)
             self.train_accs.append(train_acc)
             
-            # 打印训练结果
             print(f'\nEpoch {epoch}/{self.config.epochs}:')
             print(f'  Train Loss: {train_loss:.4f} (cls: {cls_loss:.4f}, con: {con_loss:.4f})')
             print(f'  Train Acc:  {train_acc:.2f}%')
             
-            # 每10轮测试一次
+            # 测试
             if epoch % self.config.test_interval == 0:
                 test_loss, test_acc, preds, labels = self.test()
                 self.test_losses.append(test_loss)
@@ -226,7 +311,7 @@ class Trainer:
                 print(f'  Test Loss:  {test_loss:.4f}')
                 print(f'  Test Acc:   {test_acc:.2f}%')
                 
-                # 保存最佳模型
+                # 保存最佳
                 is_best = test_acc > self.best_test_acc
                 if is_best:
                     self.best_test_acc = test_acc
@@ -239,7 +324,7 @@ class Trainer:
                     {'preds': preds, 'labels': labels}
                 )
             
-            # 定期保存checkpoint
+            # 定期保存
             if epoch % self.config.save_interval == 0:
                 self.save_checkpoint(epoch, is_best=False)
         
@@ -248,15 +333,13 @@ class Trainer:
         print(f"最佳测试准确率: {self.best_test_acc:.2f}% (Epoch {self.best_epoch})")
         print(f"{'='*60}\n")
         
-        # 保存训练历史
+        # 保存历史数据
         history = {
             'train_losses': self.train_losses,
             'train_accs': self.train_accs,
             'test_losses': self.test_losses,
             'test_accs': self.test_accs,
-            'test_epochs': self.test_epochs,
-            'best_test_acc': self.best_test_acc,
-            'best_epoch': self.best_epoch
+            'best_test_acc': self.best_test_acc
         }
         np.save(os.path.join(self.config.result_dir, 'history.npy'), history)
         
@@ -264,7 +347,7 @@ class Trainer:
 
 
 def final_test(model, test_loader, config):
-    """最终测试函数"""
+    """独立的最终测试函数"""
     model.eval()
     device = config.device
     
@@ -279,7 +362,13 @@ def final_test(model, test_loader, config):
     class_total = [0] * num_classes
     
     with torch.no_grad():
-        for rcs, tf, labels in tqdm(test_loader, desc='最终测试'):
+        for batch in tqdm(test_loader, desc='Final Test'):
+            # 兼容性解包
+            if len(batch) == 4:
+                rcs, tf, labels, _ = batch
+            else:
+                rcs, tf, labels = batch
+                
             rcs = rcs.to(device)
             tf = tf.to(device)
             labels = labels.to(device)
@@ -294,7 +383,6 @@ def final_test(model, test_loader, config):
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             
-            # 统计每个类别
             for i in range(len(labels)):
                 label = labels[i].item()
                 class_total[label] += 1
@@ -306,21 +394,11 @@ def final_test(model, test_loader, config):
     print(f"\n{'='*60}")
     print(f"最终测试结果:")
     print(f"  总体准确率: {test_acc:.2f}%")
-    print(f"  总样本数: {total_samples}")
-    print(f"\n各类别准确率:")
-    for i in range(num_classes):
-        if class_total[i] > 0:
-            acc = 100.0 * class_correct[i] / class_total[i]
-            print(f"  类别 {i}: {acc:.2f}% ({class_correct[i]}/{class_total[i]})")
-    print(f"{'='*60}\n")
     
-    # 保存预测结果
     results = {
         'predictions': all_preds,
         'labels': all_labels,
-        'accuracy': test_acc,
-        'class_correct': class_correct,
-        'class_total': class_total
+        'accuracy': test_acc
     }
     np.save(os.path.join(config.result_dir, 'final_test_results.npy'), results)
     

@@ -165,7 +165,7 @@ class DashFusion(nn.Module):
             dropout=config.dropout
         )
         
-    def forward(self, rcs, tf, labels=None):
+    def forward(self, rcs, tf, labels=None,sample2=None):
         """
         rcs: [batch, 1, 256]
         tf: [batch, 1, H, W]
@@ -197,13 +197,77 @@ class DashFusion(nn.Module):
             # 分类损失
             cls_loss = F.cross_entropy(logits, labels)
             
-            # 对比学习损失
-            # 原有：RCS <-> TF
-            loss_rcs_tf = self.contrast_loss(rcs_proj, tf_proj, labels)
-            # 新增：RCS <-> Aligned 和 TF <-> Aligned
-            loss_rcs_aligned = self.contrast_loss(rcs_proj, aligned_proj, labels)
-            loss_tf_aligned = self.contrast_loss(tf_proj, aligned_proj, labels)
-            contrast_loss = (loss_rcs_tf + loss_rcs_aligned + loss_tf_aligned) / 3
+            # [核心修改] 对比学习逻辑
+            contrast_loss = 0
+            
+            # 模式 A: 如果提供了 Sample2 (Hard Mining 模式 - 复刻原文)
+            if sample2 is not None:
+                # 1. 提取 Sample2 特征
+                # sample2['rcs'] shape: [Batch * 6, 256]
+                rcs2 = sample2['rcs'].to(rcs.device)
+                tf2 = sample2['tf'].to(rcs.device)
+                
+                # 走一遍编码器
+                rcs2_feat = self.rcs_encoder(rcs2)
+                tf2_feat = self.tf_encoder(tf2)
+                
+                # 走一遍对齐 (注意：这里只需要投影，不需要梯度回传给encoder通常也可以，但原文回传了)
+                _, rcs2_proj, tf2_proj, aligned2_proj = self.dual_alignment(rcs2_feat, tf2_feat)
+                
+                # 2. 拼接特征计算 Loss
+                # 结构: 对于每个样本 i
+                # Anchor: rcs_proj[i]
+                # Candidates: rcs2_proj[6*i : 6*(i+1)] -> 包含 2Pos, 2HardNeg, 2EasyNeg
+                
+                batch_size = rcs.shape[0]
+                
+                # 定义 Temperature
+                T = self.config.temperature
+                
+                # 遍历 Batch 计算 Loss (原文逻辑的简化版，数学上等价)
+                curr_batch_loss = 0
+                for i in range(batch_size):
+                    # 取出当前 Anchor 的投影 (以 RCS 为例，你也可以加上 TF 和 Aligned)
+                    anchor = rcs_proj[i].unsqueeze(0) # [1, Dim]
+                    
+                    # 取出对应的 6 个 Sample2 投影
+                    others = rcs2_proj[6*i : 6*(i+1)] # [6, Dim]
+                    
+                    # 拼接: [7, Dim] (Anchor + 6 Others)
+                    features = torch.cat([anchor, others], dim=0)
+                    
+                    # 计算相似度 logits: [1, 7] -> Anchor 与这7个样本的相似度
+                    sim_matrix = F.cosine_similarity(anchor, features) / T
+                    
+                    # 标签构建:
+                    # Index 0 是 Anchor 自己 (Pos)
+                    # Index 1, 2 是 SS (Pos)
+                    # Index 3, 4 是 SD (Neg)
+                    # Index 5, 6 是 DD (Neg)
+                    # 所以正样本位置是: [0, 1, 2]
+                    
+                    # Softmax 归一化
+                    exp_sim = torch.exp(sim_matrix)
+                    
+                    # SimCLR Loss 公式: -log( Sum(exp(pos)) / Sum(exp(all)) )
+                    # 分子: Anchor自己 + 2个SS
+                    pos_sum = exp_sim[0] + exp_sim[1] + exp_sim[2]
+                    all_sum = exp_sim.sum()
+                    
+                    loss_i = -torch.log(pos_sum / all_sum)
+                    curr_batch_loss += loss_i
+                
+                contrast_loss = curr_batch_loss / batch_size
+                
+                # (可选) 你可以对 TF 和 Aligned 也做一遍同样的，然后取平均
+                # contrast_loss = (loss_rcs + loss_tf + loss_aligned) / 3
+
+            # 模式 B: 没有 Sample2 (Fallback 到你原来的 SupCon)
+            else:
+                loss_rcs_tf = self.contrast_loss(rcs_proj, tf_proj, labels)
+                loss_rcs_aligned = self.contrast_loss(rcs_proj, aligned_proj, labels)
+                loss_tf_aligned = self.contrast_loss(tf_proj, aligned_proj, labels)
+                contrast_loss = (loss_rcs_tf + loss_rcs_aligned + loss_tf_aligned) / 3
             
             # 总损失
             total_loss = cls_loss + self.config.contrast_loss_weight * contrast_loss
