@@ -69,7 +69,7 @@ class TFEncoder(nn.Module):
     输入: [batch, 1, H, W] - TF时频图 (H和W可以不固定)
     输出: [batch, seq_len, hidden_dim] - 编码后的序列特征
     """
-    def __init__(self, hidden_dim=128, num_layers=2, num_heads=4, dropout=0.1):
+    def __init__(self, target_seq_len=256, hidden_dim=128, num_layers=2, num_heads=4, dropout=0.1):
         super().__init__()
         self.hidden_dim = hidden_dim
         
@@ -99,11 +99,9 @@ class TFEncoder(nn.Module):
         )
         
         # 自适应池化到固定大小
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((16, 16))  # 输出 16x16
-        
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, target_seq_len))         
         # 位置编码 (16*16=256个位置)
-        self.pos_embedding = nn.Parameter(torch.randn(1, 256, hidden_dim))
-        
+        self.pos_embedding = nn.Parameter(torch.randn(1, target_seq_len, hidden_dim))
         # Transformer编码器
         self.transformer_layers = nn.ModuleList([
             TransformerEncoderLayer(hidden_dim, num_heads, dropout)
@@ -120,12 +118,11 @@ class TFEncoder(nn.Module):
         
         # 2D卷积特征提取
         x = self.conv_layers(x)           # [batch, hidden_dim, H, W]
-        x = self.adaptive_pool(x)         # [batch, hidden_dim, 16, 16]
-        
-        # 展平为序列
-        x = x.flatten(2)                  # [batch, hidden_dim, 256]
-        x = x.transpose(1, 2)             # [batch, 256, hidden_dim]
-        
+
+        x = self.adaptive_pool(x)       # [batch, hidden_dim, 1, 256]
+        x = x.squeeze(2)                # [batch, hidden_dim, 256] 去掉频率维度
+        x = x.transpose(1, 2)           # [batch, 256, hidden_dim]
+
         # 添加位置编码
         x = x + self.pos_embedding
         x = self.dropout(x)

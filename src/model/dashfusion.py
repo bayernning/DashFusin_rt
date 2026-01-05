@@ -22,6 +22,8 @@ class DualStreamAlignment(nn.Module):
         self.tf_projector = Projector(hidden_dim, output_dim=128, dropout=dropout)
         
         self.norm = nn.LayerNorm(hidden_dim)
+
+        self.aligned_projector = Projector(hidden_dim, output_dim=128, dropout=dropout)
         
     def temporal_alignment(self, rcs_feat, tf_feat):
         """
@@ -37,28 +39,33 @@ class DualStreamAlignment(nn.Module):
         
         return aligned_feat
     
-    def semantic_alignment(self, rcs_feat, tf_feat):
+    def semantic_alignment(self, rcs_feat, tf_feat, aligned_feat):
         """
-        语义对齐: 获取全局特征并投影到对比学习空间
+        语义对齐: 将所有特征投影到对比学习空间
         """
-        # 全局平均池化
-        rcs_global = rcs_feat.mean(dim=1)  # [batch, hidden_dim]
-        tf_global = tf_feat.mean(dim=1)  # [batch, hidden_dim]
+        # 1. 全局池化 (把时间序列变成一个向量)
+        # rcs_feat: [batch, 256, dim] -> [batch, dim]
+        rcs_global = rcs_feat.mean(dim=1)  
+        tf_global = tf_feat.mean(dim=1)
+        aligned_global = aligned_feat.mean(dim=1) # 新增：融合特征也需要全局化
         
-        # 投影
+        # 2. 投影 (Projectors)
         rcs_proj = self.rcs_projector(rcs_global)
         tf_proj = self.tf_projector(tf_global)
+        aligned_proj = self.aligned_projector(aligned_global) # 新增：投影融合特征
         
-        return rcs_proj, tf_proj
+        return rcs_proj, tf_proj, aligned_proj
     
     def forward(self, rcs_feat, tf_feat):
-        # 时间对齐
+        # 1. 时间对齐 (产生融合特征)
         aligned_feat = self.temporal_alignment(rcs_feat, tf_feat)
         
-        # 语义对齐
-        rcs_proj, tf_proj = self.semantic_alignment(rcs_feat, tf_feat)
+        # 2. 语义对齐 (把 三者 都投影)
+        # 注意：这里把 aligned_feat 也传进去了
+        rcs_proj, tf_proj, aligned_proj = self.semantic_alignment(rcs_feat, tf_feat, aligned_feat)
         
-        return aligned_feat, rcs_proj, tf_proj
+        # 返回所有需要的特征
+        return aligned_feat, rcs_proj, tf_proj, aligned_proj
 
 
 class SupervisedContrastiveLoss(nn.Module):
@@ -169,7 +176,8 @@ class DashFusion(nn.Module):
         tf_feat = self.tf_encoder(tf)         # [batch, seq_len, hidden_dim]
         
         # 2. 双流对齐
-        aligned_feat, rcs_proj, tf_proj = self.dual_alignment(rcs_feat, tf_feat)
+        aligned_feat, rcs_proj, tf_proj, aligned_proj = self.dual_alignment(rcs_feat, tf_feat)
+
         
         # 3. 层次瓶颈融合
         bottleneck, rcs_fused, tf_fused = self.hierarchical_fusion(
@@ -190,7 +198,12 @@ class DashFusion(nn.Module):
             cls_loss = F.cross_entropy(logits, labels)
             
             # 对比学习损失
-            contrast_loss = self.contrast_loss(rcs_proj, tf_proj, labels)
+            # 原有：RCS <-> TF
+            loss_rcs_tf = self.contrast_loss(rcs_proj, tf_proj, labels)
+            # 新增：RCS <-> Aligned 和 TF <-> Aligned
+            loss_rcs_aligned = self.contrast_loss(rcs_proj, aligned_proj, labels)
+            loss_tf_aligned = self.contrast_loss(tf_proj, aligned_proj, labels)
+            contrast_loss = (loss_rcs_tf + loss_rcs_aligned + loss_tf_aligned) / 3
             
             # 总损失
             total_loss = cls_loss + self.config.contrast_loss_weight * contrast_loss

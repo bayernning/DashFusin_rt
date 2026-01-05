@@ -197,8 +197,10 @@ class HierarchicalBottleneckFusion(nn.Module):
         )
         
         # 初始Transformer层用于处理multimodal feature
-        self.init_transformer = TransformerEncoderLayer(hidden_dim, num_heads, dropout)
-        
+        # self.init_transformer = TransformerEncoderLayer(hidden_dim, num_heads, dropout)
+        self.init_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
+
+
         # 多层HBF
         self.fusion_layers = nn.ModuleList([
             HierarchicalBottleneckFusionLayer(
@@ -218,12 +220,23 @@ class HierarchicalBottleneckFusion(nn.Module):
         """
         batch_size = rcs_feat.size(0)
         
-        # 初始化瓶颈: 从aligned_feat提取信息
-        bottleneck = self.init_transformer(aligned_feat)
-        bottleneck = bottleneck[:, :self.num_bottleneck, :]  # 取前num_bottleneck个
+        # # 初始化瓶颈: 从aligned_feat提取信息
+        # bottleneck = self.init_transformer(aligned_feat)
+        # bottleneck = bottleneck[:, :self.num_bottleneck, :]  # 取前num_bottleneck个
         
-        # 逐层融合
+        
+        # 1. 准备 Bottleneck Query (可学习的胶囊)
+        # [1, num_bt, dim] -> [batch, num_bt, dim]
+        bottleneck = self.bottleneck_tokens.repeat(batch_size, 1, 1)
+        
+        # 2. 初始化 Bottleneck
+        # 使用 bottleneck 作为 Query，aligned_feat 作为 Key/Value
+        # 这样模型会自动学会从 256 个时间步中提取最重要的信息，而不是只取前 8 个
+        bottleneck = self.init_cross_attn(bottleneck, aligned_feat, aligned_feat)
+        
+        # 3. 逐层融合 (保持不变)
         for layer in self.fusion_layers:
             bottleneck, rcs_feat, tf_feat = layer(bottleneck, rcs_feat, tf_feat)
+
         
         return bottleneck, rcs_feat, tf_feat

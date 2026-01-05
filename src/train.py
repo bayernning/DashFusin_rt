@@ -18,24 +18,46 @@ class Trainer:
         self.test_loader = test_loader
         self.config = config
         self.device = config.device
+
+        # ================= 改动开始 =================
+        # 1. 优化器参数分组 (模仿参考代码的最佳实践)
+        # 目的：不对 Bias 和 LayerNorm/BatchNorm 进行权重衰减，提升模型稳定性
+        no_decay = ['bias', 'LayerNorm.weight', 'norm.weight', 'norm1.weight', 'norm2.weight']
         
-        # 优化器
+        optimizer_grouped_parameters = [
+            {
+                'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                'weight_decay': config.weight_decay
+            },
+            {
+                'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                'weight_decay': 0.0  # 这些参数不进行衰减
+            }
+        ]
+        
         self.optimizer = optim.AdamW(
-            model.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay
+            optimizer_grouped_parameters, # 使用分组后的参数
+            lr=config.learning_rate
+            # weight_decay 在上面组里定义了，这里不需要了
         )
+        
         
         # 学习率调度器: warmup + cosine annealing
         warmup_scheduler = LinearLR(
             self.optimizer,
-            start_factor=0.1,
+            start_factor=0.01,
             total_iters=config.warmup_steps
         )
+        
+        # 计算总步数
+        total_steps = config.epochs * len(train_loader)
+        
         cosine_scheduler = CosineAnnealingLR(
             self.optimizer,
-            T_max=config.epochs * len(train_loader) - config.warmup_steps
+            T_max=total_steps - config.warmup_steps,
+            eta_min=config.learning_rate * 0.01 # 结束时不降到0，保留一点点
         )
+        
         self.scheduler = SequentialLR(
             self.optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],

@@ -203,7 +203,7 @@ if __name__ == '__main__':
     
     # 测试分类器
     print("\nTesting Classifier...")
-    classifier = Classifier(input_dim=384, hidden_dims=[256, 128], num_classes=10)
+    classifier = Classifier(input_dim=384, hidden_dims=[256, 128], num_classes=3)
     x = torch.randn(8, 384)
     logits = classifier(x)
     print(f"Input shape: {x.shape}")
