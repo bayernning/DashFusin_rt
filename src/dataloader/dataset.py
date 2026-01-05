@@ -1,11 +1,13 @@
 """
-数据加载器 - 适配RCS和TF联合数据集
+数据加载器 - 适配RCS和TF联合数据集 (包含 Hard Negative Mining 支持)
 """
 import os
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import scipy.io as sio
 import numpy as np
+import random
 
 
 class RCSTFJointDataset(Dataset):
@@ -52,6 +54,12 @@ class RCSTFJointDataset(Dataset):
 
         assert len(self.rcs_data) == len(self.tf_images), \
             f"RCS样本数({len(self.rcs_data)})必须等于TF样本数({len(self.tf_images)})"
+            
+        # -------------------------
+        # 3) 检索相关初始化 (Hard Mining)
+        # -------------------------
+        self.size = len(self.rcs_data)
+        self.M_retrieve = None # 存储检索结果
         
         print(f"[训练集] 加载完成:")
         print(f"  - RCS数据: {self.rcs_data.shape}")
@@ -59,10 +67,99 @@ class RCSTFJointDataset(Dataset):
         print(f"  - 标签: {self.rcs_labels.shape}")
         print(f"  - 样本总数: {len(self.rcs_data)}")
 
+    # [新增] 更新相似度矩阵 (由 Trainer 调用)
+    def update_matrix(self, rcs_emb, tf_emb):
+        """
+        rcs_emb: [N, Dim] 全局RCS特征
+        tf_emb: [N, Dim] 全局TF特征
+        """
+        # 1. 特征归一化并拼接
+        rcs_emb = F.normalize(rcs_emb, p=2, dim=1)
+        tf_emb = F.normalize(tf_emb, p=2, dim=1)
+        # 融合特征用于计算相似度
+        joint_emb = torch.cat((rcs_emb, tf_emb), dim=1) 
+        
+        # 2. 计算全局余弦相似度矩阵 [N, N]
+        # 注意: 这里尽量在CPU上做以防显存溢出
+        joint_emb = joint_emb.cpu()
+        cos_matrix = torch.matmul(joint_emb, joint_emb.T)
+        
+        # 3. 排序 (Descending)
+        _, rank_M = torch.sort(cos_matrix, descending=True, dim=1)
+        
+        # 4. 执行预采样分类
+        self.__pre_sample(rank_M, self.rcs_labels.cpu())
+
+    # [新增] 预采样逻辑 (Hard Mining 核心)
+    def __pre_sample(self, _rank, _label):
+        retrieve = {'ss': [], 'sd': [], 'ds': [], 'dd': []}
+        
+        for i in range(self.size):
+            _ss, _sd, _dd = [], [], []
+            
+            # 策略: 在前 60% 相似的样本中找 Positive 和 Hard Negative
+            search_range = int(self.size / 1.6)
+            for j in range(search_range):
+                idx = int(_rank[i][j])
+                if i == idx: continue # 跳过自己
+                
+                if _label[i] == _label[idx]:
+                    _ss.append(idx) # Similar & Same (强正样本)
+                else:
+                    _sd.append(idx) # Similar & Diff (难负样本)
+            
+            # 策略: 在最不相似的尾部找 Easy Negative
+            for j in range(self.size - 1, self.size - int(self.size/2), -1):
+                idx = int(_rank[i][j])
+                if i == idx: continue
+                if _label[i] != _label[idx]:
+                    _dd.append(idx) # Dissimilar & Diff (易负样本)
+            
+            # 兜底填充 (防止某种类型样本不足)
+            while len(_ss) < 2: _ss.append(random.randint(0, self.size-1))
+            while len(_sd) < 2: _sd.append(random.randint(0, self.size-1))
+            while len(_dd) < 2: _dd.append(random.randint(0, self.size-1))
+
+            retrieve['ss'].append(_ss)
+            retrieve['sd'].append(_sd)
+            retrieve['dd'].append(_dd)
+            
+        self.M_retrieve = retrieve
+        print(f"[Dataset] Hard Negatives Mined. Ready for sampling.")
+
+    # [新增] 采样函数
+    def sample(self, indices):
+        """
+        根据索引列表返回对应的 sample2
+        indices: list of int
+        """
+        if self.M_retrieve is None:
+            return None # 还没初始化矩阵
+
+        # 收集所有索引
+        batch_indices = []
+        for i in indices:
+            i = int(i)
+            # 随机抽 2个SS, 2个SD, 2个DD
+            ss = random.choices(self.M_retrieve['ss'][i], k=2)
+            sd = random.choices(self.M_retrieve['sd'][i], k=2)
+            dd = random.choices(self.M_retrieve['dd'][i], k=2)
+            batch_indices.extend(ss + sd + dd)
+            
+        # 批量取数据
+        samples2 = {
+            'rcs': self.rcs_data[batch_indices],
+            'tf': self.tf_images[batch_indices],
+            'labels': self.rcs_labels[batch_indices]
+        }
+        return samples2
+
     def __len__(self):
         return len(self.rcs_data)
 
     def __getitem__(self, idx):
+        # [修正] 这里不能调 super().__getitem__，要写真实的读取逻辑
+        
         # ---------- RCS ----------
         rcs = self.rcs_data[idx]         # (256,)
         rcs = rcs.unsqueeze(0)           # → (1,256)
@@ -73,7 +170,8 @@ class RCSTFJointDataset(Dataset):
         if self.tf_transform:
             tf_img = self.tf_transform(tf_img)
 
-        return rcs, tf_img, label
+        # 返回 idx 供 Hard Mining 使用
+        return rcs, tf_img, label, idx
 
 
 class Test_RCSTFJointDataset(Dataset):
@@ -81,13 +179,6 @@ class Test_RCSTFJointDataset(Dataset):
     RCS和TF联合测试数据集
     """
     def __init__(self, rcs_mat_path, tf_images, tf_labels, tf_transform=None):
-        """
-        Args:
-            rcs_mat_path: RCS的.mat文件路径
-            tf_images: TF图像tensor [N, 256, 256]
-            tf_labels: TF标签tensor [N]
-            tf_transform: TF图像的变换
-        """
         # -------------------------
         # 1) 读取 RCS 数据
         # -------------------------
@@ -141,6 +232,7 @@ class Test_RCSTFJointDataset(Dataset):
         if self.tf_transform:
             tf_img = self.tf_transform(tf_img)
 
+        # 测试集不需要返回 idx
         return rcs, tf_img, label
 
 
@@ -184,7 +276,7 @@ def get_dataloader(config, split='train'):
             rcs_mat_path=mat_path,
             tf_images=tf_images,
             tf_labels=tf_labels,
-            tf_transform=None  # 可以在这里添加数据增强
+            tf_transform=None
         )
     else:  # test
         dataset = Test_RCSTFJointDataset(
@@ -220,18 +312,23 @@ def check_data_format(config):
     
     try:
         train_loader = get_dataloader(config, 'train')
-        test_loader = get_dataloader(config, 'test')
         
         # 测试一个batch
-        rcs, tf, labels = next(iter(train_loader))
+        batch = next(iter(train_loader))
+        
+        # 兼容性处理
+        if len(batch) == 4:
+            rcs, tf, labels, idx = batch
+        else:
+            rcs, tf, labels = batch
+            idx = None
         
         print(f"\n✓ 数据格式检查通过:")
         print(f"  - RCS shape: {rcs.shape} (期望: [batch, 1, 256])")
         print(f"  - TF shape: {tf.shape} (期望: [batch, 1, H, W])")
         print(f"  - Labels shape: {labels.shape} (期望: [batch])")
-        print(f"  - RCS范围: [{rcs.min():.3f}, {rcs.max():.3f}]")
-        print(f"  - TF范围: [{tf.min():.3f}, {tf.max():.3f}]")
-        print(f"  - 标签唯一值: {torch.unique(labels).tolist()}")
+        if idx is not None:
+             print(f"  - Indices shape: {idx.shape} (用于 Hard Mining)")
         
         return True
         
@@ -240,6 +337,7 @@ def check_data_format(config):
         import traceback
         traceback.print_exc()
         return False
+
 
 
 if __name__ == '__main__':

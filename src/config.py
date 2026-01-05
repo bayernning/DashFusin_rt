@@ -22,24 +22,24 @@ def get_config():
     parser.add_argument('--num_encoder_layers', type=int, default=2, help='编码器层数')
     parser.add_argument('--num_fusion_layers', type=int, default=2, help='融合层数')
     parser.add_argument('--num_bottleneck', type=int, default=8, help='初始瓶颈token数量')
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout率')
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout率')
     
     # 对比学习相关
     parser.add_argument('--temperature', type=float, default=0.1, help='对比学习温度参数')
     parser.add_argument('--contrast_loss_weight', type=float, default=0.1, help='对比学习损失权重')
     
     # 训练相关
-    parser.add_argument('--batch_size', type=int, default=32, help='批次大小')
-    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
-    parser.add_argument('--learning_rate', type=float, default=5e-4, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=5e-5, help='权重衰减')
+    parser.add_argument('--batch_size', type=int, default=30, help='批次大小')
+    parser.add_argument('--epochs', type=int, default=30, help='训练轮数')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='学习率')
+    parser.add_argument('--weight_decay', type=float, default=1e-3, help='权重衰减')
     parser.add_argument('--warmup_steps', type=int, default=50, help='预热步数')
     parser.add_argument('--grad_clip', type=float, default=1.0, help='梯度裁剪')
     parser.add_argument('--test_interval', type=int, default=5, help='测试间隔(每N轮测试一次)')
     
     # 设备相关
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--seed', type=int, default=52, help='随机种子')
+    parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--num_workers', type=int, default=4, help='数据加载线程数')
     
     # 日志和保存相关

@@ -165,11 +165,12 @@ class DashFusion(nn.Module):
             dropout=config.dropout
         )
         
-    def forward(self, rcs, tf, labels=None,sample2=None):
+    def forward(self, rcs, tf, labels=None, sample2=None):
         """
         rcs: [batch, 1, 256]
         tf: [batch, 1, H, W]
         labels: [batch] (optional)
+        sample2: dict (optional) - Hard Negative Mining samples
         """
         # 1. 模态编码
         rcs_feat = self.rcs_encoder(rcs)      # [batch, 256, hidden_dim]
@@ -206,7 +207,12 @@ class DashFusion(nn.Module):
                 # sample2['rcs'] shape: [Batch * 6, 256]
                 rcs2 = sample2['rcs'].to(rcs.device)
                 tf2 = sample2['tf'].to(rcs.device)
-                
+
+                # [Fix] 检查维度: RCS 应该是 [B, 1, 256]
+                # Dataset 采样出来的通常是 [B, 256]，需要增加通道维度
+                if rcs2.dim() == 2:
+                    rcs2 = rcs2.unsqueeze(1) # [192, 256] -> [192, 1, 256]
+
                 # 走一遍编码器
                 rcs2_feat = self.rcs_encoder(rcs2)
                 tf2_feat = self.tf_encoder(tf2)
@@ -214,53 +220,33 @@ class DashFusion(nn.Module):
                 # 走一遍对齐 (注意：这里只需要投影，不需要梯度回传给encoder通常也可以，但原文回传了)
                 _, rcs2_proj, tf2_proj, aligned2_proj = self.dual_alignment(rcs2_feat, tf2_feat)
                 
-                # 2. 拼接特征计算 Loss
-                # 结构: 对于每个样本 i
-                # Anchor: rcs_proj[i]
-                # Candidates: rcs2_proj[6*i : 6*(i+1)] -> 包含 2Pos, 2HardNeg, 2EasyNeg
+                # 计算 Hard Mining 的对比损失
+                # 这里我们使用简化的逻辑：将所有特征拼在一起，利用标签关系
+                # 为了复用 SupervisedContrastiveLoss，我们需要构建对应的标签
                 
-                batch_size = rcs.shape[0]
+                # 构造大Batch: [Anchor_Batch + Sample2_Batch]
+                # Anchor: 32个
+                # Sample2: 32 * 6 = 192个
+                # Total: 224个
                 
-                # 定义 Temperature
-                T = self.config.temperature
+                # 拼接特征
+                combined_rcs_proj = torch.cat([rcs_proj, rcs2_proj], dim=0)
+                combined_tf_proj = torch.cat([tf_proj, tf2_proj], dim=0)
+                combined_aligned_proj = torch.cat([aligned_proj, aligned2_proj], dim=0)
                 
-                # 遍历 Batch 计算 Loss (原文逻辑的简化版，数学上等价)
-                curr_batch_loss = 0
-                for i in range(batch_size):
-                    # 取出当前 Anchor 的投影 (以 RCS 为例，你也可以加上 TF 和 Aligned)
-                    anchor = rcs_proj[i].unsqueeze(0) # [1, Dim]
-                    
-                    # 取出对应的 6 个 Sample2 投影
-                    others = rcs2_proj[6*i : 6*(i+1)] # [6, Dim]
-                    
-                    # 拼接: [7, Dim] (Anchor + 6 Others)
-                    features = torch.cat([anchor, others], dim=0)
-                    
-                    # 计算相似度 logits: [1, 7] -> Anchor 与这7个样本的相似度
-                    sim_matrix = F.cosine_similarity(anchor, features) / T
-                    
-                    # 标签构建:
-                    # Index 0 是 Anchor 自己 (Pos)
-                    # Index 1, 2 是 SS (Pos)
-                    # Index 3, 4 是 SD (Neg)
-                    # Index 5, 6 是 DD (Neg)
-                    # 所以正样本位置是: [0, 1, 2]
-                    
-                    # Softmax 归一化
-                    exp_sim = torch.exp(sim_matrix)
-                    
-                    # SimCLR Loss 公式: -log( Sum(exp(pos)) / Sum(exp(all)) )
-                    # 分子: Anchor自己 + 2个SS
-                    pos_sum = exp_sim[0] + exp_sim[1] + exp_sim[2]
-                    all_sum = exp_sim.sum()
-                    
-                    loss_i = -torch.log(pos_sum / all_sum)
-                    curr_batch_loss += loss_i
+                # 拼接标签
+                sample2_labels = sample2['labels'].to(labels.device)
+                combined_labels = torch.cat([labels, sample2_labels], dim=0)
                 
-                contrast_loss = curr_batch_loss / batch_size
+                # 计算损失 (在大Batch上计算)
+                # RCS <-> TF
+                loss_rcs_tf = self.contrast_loss(combined_rcs_proj, combined_tf_proj, combined_labels)
+                # RCS <-> Aligned
+                loss_rcs_aligned = self.contrast_loss(combined_rcs_proj, combined_aligned_proj, combined_labels)
+                # TF <-> Aligned
+                loss_tf_aligned = self.contrast_loss(combined_tf_proj, combined_aligned_proj, combined_labels)
                 
-                # (可选) 你可以对 TF 和 Aligned 也做一遍同样的，然后取平均
-                # contrast_loss = (loss_rcs + loss_tf + loss_aligned) / 3
+                contrast_loss = (loss_rcs_tf + loss_rcs_aligned + loss_tf_aligned) / 3
 
             # 模式 B: 没有 Sample2 (Fallback 到你原来的 SupCon)
             else:

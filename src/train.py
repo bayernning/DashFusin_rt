@@ -1,5 +1,6 @@
 """
-训练脚本 - 包含完整的 Hard Negative Mining (难样本挖掘) 逻辑
+训练脚本 - 包含 Hard Negative Mining 逻辑
+(使用 utils.py 进行绘图)
 """
 import torch
 import torch.nn as nn
@@ -10,6 +11,8 @@ import time
 from tqdm import tqdm
 import numpy as np
 
+# [修改] 导入 utils 中的可视化函数
+from utils import visualize_training_history
 
 class Trainer:
     def __init__(self, model, train_loader, test_loader, config):
@@ -116,7 +119,6 @@ class Trainer:
                 rcs_feat = self.model.rcs_encoder(rcs).mean(dim=1)
                 tf_feat = self.model.tf_encoder(tf).mean(dim=1)
                 
-                # 填入对应的位置
                 all_rcs[indices] = rcs_feat
                 all_tf[indices] = tf_feat
                 filled_mask[indices] = True
@@ -134,7 +136,6 @@ class Trainer:
     def train_epoch(self, epoch):
         """训练一个 Epoch"""
         self.model.train()
-        
         total_loss = 0
         total_cls_loss = 0
         total_contrast_loss = 0
@@ -237,7 +238,6 @@ class Trainer:
             logits = outputs['logits']
             
             total_loss += loss.item()
-            
             preds = logits.argmax(dim=-1)
             total_correct += (preds == labels).sum().item()
             total_samples += labels.size(0)
@@ -270,14 +270,12 @@ class Trainer:
             best_path = os.path.join(self.config.ckpt_dir, 'best.pth')
             torch.save(checkpoint, best_path)
             print(f'✓ 保存最佳模型，测试准确率: {self.best_test_acc:.2f}%')
-    
+
     def train(self):
         """主训练流程"""
         print(f"\n{'='*60}")
         print(f"训练 DashFusion on {self.device}")
         print(f"模型参数: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
-        print(f"训练样本: {len(self.train_loader.dataset)}")
-        print(f"测试间隔: 每 {self.config.test_interval} 轮")
         print(f"{'='*60}\n")
         
         # 为了生成初始的 Sample2，建议在第1轮开始前也更新一次（可选）
@@ -297,23 +295,17 @@ class Trainer:
             self.train_losses.append(train_loss)
             self.train_accs.append(train_acc)
             
-            print(f'\nEpoch {epoch}/{self.config.epochs}:')
-            print(f'  Train Loss: {train_loss:.4f} (cls: {cls_loss:.4f}, con: {con_loss:.4f})')
-            print(f'  Train Acc:  {train_acc:.2f}%')
+            print(f'\nEpoch {epoch}: Train Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%')
             
-            # 测试
             if epoch % self.config.test_interval == 0:
                 test_loss, test_acc, preds, labels = self.test()
                 self.test_losses.append(test_loss)
                 self.test_accs.append(test_acc)
                 self.test_epochs.append(epoch)
                 
-                print(f'  Test Loss:  {test_loss:.4f}')
-                print(f'  Test Acc:   {test_acc:.2f}%')
+                print(f'  Test Loss: {test_loss:.4f} | Acc: {test_acc:.2f}%')
                 
-                # 保存最佳
-                is_best = test_acc > self.best_test_acc
-                if is_best:
+                if test_acc > self.best_test_acc:
                     self.best_test_acc = test_acc
                     self.best_epoch = epoch
                     self.save_checkpoint(epoch, is_best=True)
@@ -329,28 +321,31 @@ class Trainer:
                 self.save_checkpoint(epoch, is_best=False)
         
         print(f"\n{'='*60}")
-        print(f"训练完成!")
-        print(f"最佳测试准确率: {self.best_test_acc:.2f}% (Epoch {self.best_epoch})")
-        print(f"{'='*60}\n")
+        print(f"训练完成! 最佳测试准确率: {self.best_test_acc:.2f}% (Epoch {self.best_epoch})")
         
-        # 保存历史数据
+        # 保存数据
+        history_path = os.path.join(self.config.result_dir, 'history.npy')
         history = {
             'train_losses': self.train_losses,
             'train_accs': self.train_accs,
             'test_losses': self.test_losses,
             'test_accs': self.test_accs,
+            'test_epochs': self.test_epochs,
             'best_test_acc': self.best_test_acc
         }
         np.save(os.path.join(self.config.result_dir, 'history.npy'), history)
-        
+         # [修改] 使用 utils.py 中的函数进行绘图
+        try:
+            plot_path = os.path.join(self.config.result_dir, 'training_curves.png')
+            visualize_training_history(history_path, save_path=plot_path)
+        except Exception as e:
+            print(f"绘图错误: {e}")
+            
         return self.best_test_acc
-
-
 def final_test(model, test_loader, config):
-    """独立的最终测试函数"""
+    # (保持不变)
     model.eval()
     device = config.device
-    
     total_correct = 0
     total_samples = 0
     all_preds = []
@@ -372,7 +367,6 @@ def final_test(model, test_loader, config):
             rcs = rcs.to(device)
             tf = tf.to(device)
             labels = labels.to(device)
-            
             outputs = model(rcs, tf)
             logits = outputs['logits']
             preds = logits.argmax(dim=-1)
@@ -394,7 +388,15 @@ def final_test(model, test_loader, config):
     print(f"\n{'='*60}")
     print(f"最终测试结果:")
     print(f"  总体准确率: {test_acc:.2f}%")
+    print(f"  总样本数: {total_samples}")
+    print(f"\n各类别准确率:")
+    for i in range(num_classes):
+        if class_total[i] > 0:
+            acc = 100.0 * class_correct[i] / class_total[i]
+            print(f"  类别 {i}: {acc:.2f}% ({class_correct[i]}/{class_total[i]})")
+    print(f"{'='*60}\n")
     
+    # 保存预测结果
     results = {
         'predictions': all_preds,
         'labels': all_labels,
@@ -403,7 +405,6 @@ def final_test(model, test_loader, config):
     np.save(os.path.join(config.result_dir, 'final_test_results.npy'), results)
     
     return test_acc
-
 
 def load_checkpoint(model, ckpt_path, device):
     """加载checkpoint"""
