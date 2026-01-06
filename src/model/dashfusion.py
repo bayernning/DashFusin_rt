@@ -8,6 +8,32 @@ from model.encoders import RCSEncoder, TFEncoder
 from model.layers import CrossModalAttention, HierarchicalBottleneckFusion
 from model.MLP import DualProjector, MultimodalClassifier
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss: 专注于难分样本，解决类别不平衡
+    Formula: L = -alpha * (1 - pt)^gamma * log(pt)
+    """
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        # inputs: [N, C] logits
+        # targets: [N] labels
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
 
 class DualStreamAlignment(nn.Module):
     """双流对齐模块: 时间对齐 + 语义对齐"""
@@ -145,7 +171,12 @@ class DashFusion(nn.Module):
         self.contrast_loss = SupervisedContrastiveLoss(
             temperature=config.temperature
         )
-        
+
+        # =====================================================================
+        # self.cls_loss_fn = FocalLoss(alpha=1, gamma=1.0)
+        class_weights = torch.tensor([1.0, 2.5, 1.0]) 
+        self.cls_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+
         # 4. 层次瓶颈融合
         self.hierarchical_fusion = HierarchicalBottleneckFusion(
             hidden_dim=config.hidden_dim,
@@ -195,8 +226,13 @@ class DashFusion(nn.Module):
         
         # 计算损失
         if labels is not None:
+            # 确保权重在正确的设备上
+            if self.cls_loss_fn.weight.device != logits.device:
+                self.cls_loss_fn.weight = self.cls_loss_fn.weight.to(logits.device)
+                
             # 分类损失
-            cls_loss = F.cross_entropy(logits, labels)
+            # cls_loss = F.cross_entropy(logits, labels)
+            cls_loss = self.cls_loss_fn(logits, labels)
             
             # [核心修改] 对比学习逻辑
             contrast_loss = 0

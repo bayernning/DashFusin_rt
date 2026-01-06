@@ -10,6 +10,9 @@ import os
 import time
 from tqdm import tqdm
 import numpy as np
+import torch.nn.functional as F
+from logger import LoggerWrapper
+from datetime import datetime
 
 # [修改] 导入 utils 中的可视化函数
 from utils import visualize_training_history
@@ -21,6 +24,15 @@ class Trainer:
         self.test_loader = test_loader
         self.config = config
         self.device = config.device
+
+        self.logger = LoggerWrapper(
+            config.log_dir, 
+            log_name='train',
+            add_timestamp=True  # ← 添加这个参数
+        )
+        self.logger.log_config(config)
+        self.logger.log_model(model)
+        self.session_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         # ============================================================
         # 1. 优化器配置 (不衰减 Bias 和 Norm 层，提升稳定性)
@@ -141,7 +153,7 @@ class Trainer:
         total_contrast_loss = 0
         total_correct = 0
         total_samples = 0
-        
+
         pbar = tqdm(self.train_loader, desc=f'Epoch {epoch}/{self.config.epochs}')
         
         for batch_idx, batch in enumerate(pbar):
@@ -262,21 +274,39 @@ class Trainer:
         }
         
         # 保存 last.pth
-        ckpt_path = os.path.join(self.config.ckpt_dir, 'last.pth')
-        torch.save(checkpoint, ckpt_path)
+        last_filename = f'{self.session_timestamp}_last_{self.config.noise_level}dB.pth'
+        last_path = os.path.join(self.config.ckpt_dir, last_filename)
+        torch.save(checkpoint, last_path)
         
         # 保存 best.pth
         if is_best:
-            best_path = os.path.join(self.config.ckpt_dir, 'best.pth')
+            # 详细文件名（带准确率）
+            best_detail = f'{self.session_timestamp}_best_acc_{self.config.noise_level}dB_{self.best_test_acc:.2f}_epoch_{epoch}.pth'
+            best_detail_path = os.path.join(self.config.ckpt_dir, best_detail)
+            torch.save(checkpoint, best_detail_path)
+            
+            # 简洁文件名
+            best_filename = f'{self.session_timestamp}_best_{self.config.noise_level}dB.pth'
+            best_path = os.path.join(self.config.ckpt_dir, best_filename)
             torch.save(checkpoint, best_path)
-            print(f'✓ 保存最佳模型，测试准确率: {self.best_test_acc:.2f}%')
+            
+            # 可选：不带时间戳的best.pth（始终指向最新）
+            latest_best = os.path.join(self.config.ckpt_dir, f'best_{self.config.noise_level}dB.pth')
+            torch.save(checkpoint, latest_best)
+            
+            self.logger.log_best(epoch, 'test_acc', self.best_test_acc)
+            self.logger.info(f"[Checkpoint] 已保存: {best_filename}")
 
     def train(self):
         """主训练流程"""
-        print(f"\n{'='*60}")
-        print(f"训练 DashFusion on {self.device}")
-        print(f"模型参数: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
-        print(f"{'='*60}\n")
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"Session: {self.session_timestamp}")
+        self.logger.info(f"训练 DashFusion on {self.device}")
+        self.logger.info(f"模型参数: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
+        self.logger.info(f"{'='*60}\n")
+        
+        import time
+        start_time = time.time()
         
         # 为了生成初始的 Sample2，建议在第1轮开始前也更新一次（可选）
         # self.update_similarity_matrix() 
@@ -299,6 +329,12 @@ class Trainer:
             
             if epoch % self.config.test_interval == 0:
                 test_loss, test_acc, preds, labels = self.test()
+
+                train_metrics = {'loss': train_loss, 'cls_loss': cls_loss, 
+                     'contrast_loss': con_loss, 'acc': train_acc}
+                test_metrics = {'loss': test_loss, 'acc': test_acc}
+                self.logger.log_epoch(epoch, train_metrics, test_metrics)
+
                 self.test_losses.append(test_loss)
                 self.test_accs.append(test_acc)
                 self.test_epochs.append(epoch)
@@ -340,8 +376,12 @@ class Trainer:
             visualize_training_history(history_path, save_path=plot_path)
         except Exception as e:
             print(f"绘图错误: {e}")
+
+        total_time = time.time() - start_time
+        self.logger.log_complete(total_time, self.best_epoch, self.best_test_acc)
             
         return self.best_test_acc
+    
 def final_test(model, test_loader, config):
     # (保持不变)
     model.eval()

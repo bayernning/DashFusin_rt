@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import scipy.io as sio
 import numpy as np
 import random
-
+from torchvision import transforms
 
 class RCSTFJointDataset(Dataset):
     """
@@ -148,7 +148,7 @@ class RCSTFJointDataset(Dataset):
             
         # 批量取数据
         samples2 = {
-            'rcs': self.rcs_data[batch_indices],
+            'rcs': self.rcs_data[batch_indices].unsqueeze(1),
             'tf': self.tf_images[batch_indices],
             'labels': self.rcs_labels[batch_indices]
         }
@@ -270,13 +270,24 @@ def get_dataloader(config, split='train'):
     tf_images = data["image"]
     tf_labels = data["label"]
     
-    # 创建数据集
+    # # 1. 定义增强策略 (仅针对训练集)
+    # if split == 'train':
+    #     # 针对 Time-Frequency 图的增强
+    #     tf_transform = transforms.Compose([
+    #         transforms.RandomHorizontalFlip(p=0.5),      # 水平翻转 (增加样本多样性)
+    #         transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)), # 轻微旋转和平移
+    #         # 注意：不要用垂直翻转，因为频率轴(Y轴)具有物理意义，不能随意颠倒
+    #     ])
+    # else:
+    #     tf_transform = None
+
+    # 2. 传入 dataset
     if split == 'train':
         dataset = RCSTFJointDataset(
             rcs_mat_path=mat_path,
             tf_images=tf_images,
             tf_labels=tf_labels,
-            tf_transform=None
+            tf_transform=None  # <--- 这里把 None 改成 tf_transform
         )
     else:  # test
         dataset = Test_RCSTFJointDataset(

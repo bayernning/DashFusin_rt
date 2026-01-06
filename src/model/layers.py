@@ -200,6 +200,10 @@ class HierarchicalBottleneckFusion(nn.Module):
         # self.init_transformer = TransformerEncoderLayer(hidden_dim, num_heads, dropout)
         self.init_cross_attn = CrossModalAttention(hidden_dim, num_heads, dropout)
 
+        self.bottleneck_transformers = nn.ModuleList([
+            TransformerEncoderLayer(hidden_dim, num_heads, dropout)
+            for _ in range(num_layers)
+        ])
 
         # 多层HBF
         self.fusion_layers = nn.ModuleList([
@@ -235,8 +239,10 @@ class HierarchicalBottleneckFusion(nn.Module):
         bottleneck = self.init_cross_attn(bottleneck, aligned_feat, aligned_feat)
         
         # 3. 逐层融合 (保持不变)
-        for layer in self.fusion_layers:
+        for i, layer in enumerate(self.fusion_layers):
+            # 添加这一行
+            bottleneck = self.bottleneck_transformers[i](bottleneck)
+            
+            # 原有代码
             bottleneck, rcs_feat, tf_feat = layer(bottleneck, rcs_feat, tf_feat)
-
-        
         return bottleneck, rcs_feat, tf_feat
