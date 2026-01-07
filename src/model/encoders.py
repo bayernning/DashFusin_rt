@@ -133,6 +133,3 @@ class TFEncoder(nn.Module):
         
         return x  # [batch, 256, hidden_dim]
 
-
-# ProjectionHead 已移至 MLP.py
-# 请使用: from MLP import Projector

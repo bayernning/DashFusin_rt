@@ -27,6 +27,7 @@ class Trainer:
 
         self.logger = LoggerWrapper(
             config.log_dir, 
+            config = config,
             log_name='train',
             add_timestamp=True  # ← 添加这个参数
         )
@@ -263,7 +264,9 @@ class Trainer:
         return avg_loss, test_acc, all_preds, all_labels
     
     def save_checkpoint(self, epoch, is_best=False):
-        """保存 Checkpoint"""
+        """
+        保存 Checkpoint (修正版 - 带dB后缀)
+        """
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -273,29 +276,26 @@ class Trainer:
             'config': self.config
         }
         
-        # 保存 last.pth
-        last_filename = f'{self.session_timestamp}_last_{self.config.noise_level}dB.pth'
-        last_path = os.path.join(self.config.ckpt_dir, last_filename)
+        # 1. 保存 last.pth (始终指向最后一次保存的状态，保持不变方便恢复)
+        last_path = os.path.join(self.config.ckpt_dir, 'last.pth')
         torch.save(checkpoint, last_path)
         
-        # 保存 best.pth
+        # 2. 处理最佳模型保存
         if is_best:
-            # 详细文件名（带准确率）
-            best_detail = f'{self.session_timestamp}_best_acc_{self.config.noise_level}dB_{self.best_test_acc:.2f}_epoch_{epoch}.pth'
-            best_detail_path = os.path.join(self.config.ckpt_dir, best_detail)
-            torch.save(checkpoint, best_detail_path)
-            
-            # 简洁文件名
-            best_filename = f'{self.session_timestamp}_best_{self.config.noise_level}dB.pth'
-            best_path = os.path.join(self.config.ckpt_dir, best_filename)
+            # A. 标准最佳模型 (固定名称，供代码自动读取)
+            best_path = os.path.join(self.config.ckpt_dir, 'best.pth')
             torch.save(checkpoint, best_path)
             
-            # 可选：不带时间戳的best.pth（始终指向最新）
-            latest_best = os.path.join(self.config.ckpt_dir, f'best_{self.config.noise_level}dB.pth')
-            torch.save(checkpoint, latest_best)
+            # B. 历史备份 (带详细信息 + dB信息)
+            # [修改点] 增加了 _{self.config.noise_level}dB
+            backup_name = f'best_acc_{self.best_test_acc:.2f}_epoch_{epoch}_{self.config.noise_level}dB.pth'
             
-            self.logger.log_best(epoch, 'test_acc', self.best_test_acc)
-            self.logger.info(f"[Checkpoint] 已保存: {best_filename}")
+            backup_path = os.path.join(self.config.ckpt_dir, backup_name)
+            torch.save(checkpoint, backup_path)
+            
+            self.logger.info(f"[Checkpoint] 备份最佳模型: {backup_name}")
+        else:
+            pass
 
     def train(self):
         """主训练流程"""
@@ -352,7 +352,7 @@ class Trainer:
                     {'preds': preds, 'labels': labels}
                 )
             
-            # 定期保存
+            # 定期保存 (last.pth)
             if epoch % self.config.save_interval == 0:
                 self.save_checkpoint(epoch, is_best=False)
         
@@ -448,8 +448,18 @@ def final_test(model, test_loader, config):
 
 def load_checkpoint(model, ckpt_path, device):
     """加载checkpoint"""
+    if not os.path.exists(ckpt_path):
+        print(f"错误: 找不到 Checkpoint 文件: {ckpt_path}")
+        # 如果找不到 best.pth，尝试找找目录下的其他 pth 文件提示用户
+        ckpt_dir = os.path.dirname(ckpt_path)
+        if os.path.exists(ckpt_dir):
+            files = [f for f in os.listdir(ckpt_dir) if f.endswith('.pth')]
+            if files:
+                print(f"目录 {ckpt_dir} 下存在以下文件: {files}")
+        return model
+
     checkpoint = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"加载checkpoint: {ckpt_path}")
+    print(f"加载checkpoint成功: {ckpt_path}")
     print(f"Epoch: {checkpoint['epoch']}, 最佳测试准确率: {checkpoint['best_test_acc']:.2f}%")
     return model
