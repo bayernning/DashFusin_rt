@@ -193,6 +193,7 @@ class DashFusion(nn.Module):
         
         # 1. 模态编码
         self.rcs_encoder = OptimizedRCSEncoder(
+        # self.rcs_encoder = RCSEncoder(
             rcs_dim=config.rcs_dim,
             hidden_dim=config.hidden_dim,
             num_layers=config.num_encoder_layers,
@@ -201,6 +202,7 @@ class DashFusion(nn.Module):
         )
         
         self.tf_encoder = OptimizedTFEncoder(
+        # self.tf_encoder = TFEncoder(
             target_seq_len=config.rcs_dim,
             hidden_dim=config.hidden_dim,
             num_layers=config.num_encoder_layers,

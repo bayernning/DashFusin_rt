@@ -156,6 +156,25 @@ EXPERIMENT_CONFIGS = [
 
     #     }
     # },
+    # {
+    #     'name': 'claudesuggest',
+    #     'description': '激进配置 - 快速收敛（大数据集推荐）',
+    #     'params': {
+    #         'learning_rate': 1e-4,   # ← 大lr
+    #         'batch_size': 30,        # ← 大batch
+    #         'epochs': 100,
+    #         'num_bottleneck': 4,    
+    #         'num_fusion_layers': 1,  
+    #         'contrast_loss_weight': 0.2,  
+    #         'temperature': 0.1,
+    #         'dropout': 0.2,          
+    #         'warmup_steps': 100,
+    #         'weight_decay': 1e-4,   
+    #         'hidden_dim':64,
+    #         'num_fusion_layers':1,
+    #         'num_encoder_layers':2
+    #     }
+    # },
     {
         'name': 'claudesuggest',
         'description': '激进配置 - 快速收敛（大数据集推荐）',
@@ -170,9 +189,80 @@ EXPERIMENT_CONFIGS = [
             'dropout': 0.2,          
             'warmup_steps': 100,
             'weight_decay': 1e-4,   
+            'hidden_dim':32,
+            'num_encoder_layers':2
+        }
+    },
+    {
+        'name': 'claudesuggest',
+        'description': '激进配置 - 快速收敛（大数据集推荐）',
+        'params': {
+            'learning_rate': 2e-4,   # ← 
+            'batch_size': 30,        
+            'epochs': 100,
+            'num_bottleneck': 4,    
+            'num_fusion_layers': 1,  
+            'contrast_loss_weight': 0.2,  
+            'temperature': 0.1,
+            'dropout': 0.2,          
+            'warmup_steps': 100,
+            'weight_decay': 1e-4,   
             'hidden_dim':64,
-            'num_fusion_layers':1,
-            'num_encoder_layers':1
+            'num_encoder_layers':2
+        }
+    },
+    {
+        'name': 'claudesuggest',
+        'description': '激进配置 - 快速收敛（大数据集推荐）',
+        'params': {
+            'learning_rate': 1e-4,   
+            'batch_size': 30,        
+            'epochs': 100,
+            'num_bottleneck': 4,    
+            'num_fusion_layers': 2,  # ← 
+            'contrast_loss_weight': 0.2,  
+            'temperature': 0.1,
+            'dropout': 0.2,          
+            'warmup_steps': 100,
+            'weight_decay': 1e-4,   
+            'hidden_dim':64,
+            'num_encoder_layers':2
+        }
+    },
+    {
+        'name': 'claudesuggest',
+        'description': '激进配置 - 快速收敛（大数据集推荐）',
+        'params': {
+            'learning_rate': 1e-4,   
+            'batch_size': 30,        
+            'epochs': 100,
+            'num_bottleneck': 4,    
+            'num_fusion_layers': 1,  
+            'contrast_loss_weight': 0.2,  
+            'temperature': 0.05,   # ←
+            'dropout': 0.2,          
+            'warmup_steps': 100,
+            'weight_decay': 1e-4,   
+            'hidden_dim':64,
+            'num_encoder_layers':2
+        }
+    },
+    {
+        'name': 'claudesuggest',
+        'description': '激进配置 - 快速收敛（大数据集推荐）',
+        'params': {
+            'learning_rate': 5e-5,   # ←
+            'batch_size': 30,        
+            'epochs': 100,
+            'num_bottleneck': 4,    
+            'num_fusion_layers': 1,  
+            'contrast_loss_weight': 0.2,  
+            'temperature': 0.1,
+            'dropout': 0.2,          
+            'warmup_steps': 100,
+            'weight_decay': 1e-4,   
+            'hidden_dim':64,
+            'num_encoder_layers':2
         }
     },
     

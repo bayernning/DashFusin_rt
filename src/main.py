@@ -7,7 +7,7 @@ import sys
 
 from config import get_config
 from model.dashfusion import DashFusion
-from dataloader.dataset import get_dataloader, check_data_format
+from dataloader.dataset_12 import get_dataloader, check_data_format
 from train import Trainer, final_test, load_checkpoint
 from utils import set_seed, save_config, print_model_summary, visualize_training_history
 
